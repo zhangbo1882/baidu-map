@@ -53,10 +53,10 @@ class Office:
         resp = requests.get(self.url)
         result=resp.text
         data = json.loads(result)
-        loc = data["results"][0]["location"]
-        self.poi=Poi(loc["lat"], loc["lng"])
-        #print("Get poi for %s" %  self.url)
-        #print(self.poi)
+        #loc = data["results"][0]["location"]
+        #self.poi=Poi(loc["lat"], loc["lng"])
+        print("Get poi for %s" %  data)
+        print(self.poi)
 
 class Person:
     name=""
@@ -150,12 +150,14 @@ def setAllPoi():
     for o in offices:
         o.getPoi()
 
+o = Office("长宁支行", "平安银行长宁支行")
+o.getPoi()
 
-loadData(excel_file_path)
-setAllPoi()
-for p in persons:
-    for o in offices:
-        p.run(o)
-    p.show()
+#loadData(excel_file_path)
+#setAllPoi()
+#for p in persons:
+#    for o in offices:
+#        p.run(o)
+#    p.show()
 
 

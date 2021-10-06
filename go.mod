@@ -3,6 +3,7 @@ module github.com/zhangbo1882/baidu-map
 go 1.17
 
 require (
+	github.com/banzaicloud/logrus-runtime-formatter v0.0.0-20190729070250-5ae5475bae5e
 	github.com/go-resty/resty/v2 v2.6.0
 	github.com/sirupsen/logrus v1.8.1
 	github.com/xuri/excelize/v2 v2.4.1
