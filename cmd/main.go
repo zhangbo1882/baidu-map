@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -10,17 +11,24 @@ import (
 	"net/url"
 	"os"
 	"sort"
-	"strconv"
-	"strings"
+	_ "strconv"
+	_ "strings"
 	"time"
 
 	runtime "github.com/banzaicloud/logrus-runtime-formatter"
 	"github.com/go-resty/resty/v2"
+	"github.com/qiniu/qmgo"
 	"github.com/sirupsen/logrus"
 	"github.com/xuri/excelize/v2"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 const (
+	MIN                                  = 0.00000001
+	mongo_url                            = "mongodb://10.249.64.55:27017"
+	mongo_database                       = "local"
+	mongo_collection                     = "pingan"
 	myak                                 = "w5i9dYBqFBNR3ukdvsfpuEe40Cr53OSl"
 	sk                                   = "TGXfG0jcHTegDV0aSpQXRMtApCANqtOe"
 	place                                = "/place/v2/search?query=%s&region=%s&output=json&ak=" + myak
@@ -67,6 +75,8 @@ var (
 
 type Map struct {
 	restyClient *resty.Client
+	ctx         context.Context
+	mongoCli    *qmgo.QmgoClient
 	log         *logrus.Logger
 	excelFile   *excelize.File
 	personSlice []Person
@@ -74,39 +84,41 @@ type Map struct {
 }
 
 type Poi struct {
-	Lat float64 `json:"lat"`
-	Lng float64 `json:"lng"`
+	Lat float64 `json:"lat" bson:"lat"`
+	Lng float64 `json:"lng" bson:"lng"`
 }
 
 type Duration struct {
-	sort     []string       // sort according to the duration [drive, transport, ride, walk]
-	duration map[string]int // key: walk/drive/ride/transport
+	Sort     []string       // sort according to the duration [drive, transport, ride, walk]
+	Duration map[string]int `bson:"duration_path"` // key: walk/drive/ride/transport
 }
 
 type Person struct {
-	name             string
-	address          string
-	excelCell        string
-	canDrive         bool
-	poi              Poi
-	durationMap      map[string]Duration     // key: office.name
-	sortList         []int                   // ordered duration value
-	sortMap          map[int]DesignateOffice // get office by the ordered duration value
-	nearestOffices   []string                // save 3 nearest offices
-	nearestDurations []int
-	needRecal        bool
+	Id               primitive.ObjectID      `bson:"_id"`
+	Name             string                  `bson:"name"`
+	Address          string                  `bson:"address"`
+	ExcelCell        string                  `bson:"excel_cell,omitempty"`
+	CanDrive         bool                    `bson:"can_drive,omitempty"`
+	Poi              Poi                     `bson:"poi,omitempty"`
+	DurationMap      map[string]Duration     `bson:"duration_map,omitempty"`    // key: office.name
+	NearestOffices   [10]string              `bson:"nearest_offices,omitempty"` // save 10 nearest offices
+	NearestDurations [10]int                 `bson:"nearest_durations,omitempty"`
+	SortList         []int                   `bson:"sort_list,omitempty"` // ordered duration value
+	SortMap          map[int]DesignateOffice `bson:"sort_map,omitempty"`  // get office by the ordered duration value
+	Done             bool                    `bson:"done,omitempty"`
 }
 
 type Office struct {
-	name      string
-	address   string
-	excelCell string
-	poi       Poi
+	Id        primitive.ObjectID `bson:"_id"`
+	Name      string             `bson:"name"`
+	Address   string             `bson:"address"`
+	ExcelCell string             `bson:"excel_cell,omitempty"`
+	Poi       Poi                `bson:"pos,omitempty"`
 }
 
 type DesignateOffice struct {
-	path string
-	name string
+	Path string
+	Name string
 }
 
 type PlaceRespResult struct {
@@ -159,17 +171,6 @@ func (m *Map) loadExecelData(file string) error {
 		m.log.Errorf("Can not load excel file, err: %v", err)
 		os.Exit(1)
 	}
-
-	cols, err := f.GetCols(sheet_person)
-	if err != nil {
-		m.log.Errorf("Can not get cols, err: %v", err)
-		os.Exit(1)
-	}
-	if len(cols) < 7 {
-		m.log.Errorf("Excel data in incorrect")
-		os.Exit(1)
-	}
-
 	rows, err := f.GetRows(sheet_person)
 	if err != nil {
 		m.log.Errorf("Can not get rows, err: %v", err)
@@ -183,35 +184,20 @@ func (m *Map) loadExecelData(file string) error {
 			continue
 		}
 		name := row[sheet_person_name_index]
-		address := row[sheet_person_address_index]
-		canDrive := false
-		if strings.EqualFold(row[sheet_person_path_index], "yes") {
-			canDrive = true
+		p := Person{
+			DurationMap: make(map[string]Duration, office_number_max),
+			SortMap:     make(map[int]DesignateOffice, office_number_max),
 		}
-		office1 := row[sheet_person_office1_index]
-		office2 := row[sheet_person_office2_index]
-		office3 := row[sheet_person_office3_index]
-		offices := []string{office1, office2, office3}
-		officeDuration1, _ := strconv.Atoi(row[sheet_person_office1_duration1_index])
-		officeDuration2, _ := strconv.Atoi(row[sheet_person_office2_duration2_index])
-		officeDuration3, _ := strconv.Atoi(row[sheet_person_office3_duration3_index])
-		officeDurations := []int{officeDuration1, officeDuration2, officeDuration3}
-		needRecal := false
-		if office1 == "null" || office2 == "null" || office3 == "null" || officeDuration1 == 0 || officeDuration2 == 0 || officeDuration3 == 0 {
-			m.log.Infof("%v need re-calcuate", name)
-			needRecal = true
+		err := m.mongoCli.Find(m.ctx, bson.M{"name": name}).One(&p)
+		if err != nil {
+			m.log.Infof("%v does not exist, err: %v", name, err)
+			p.Name = name
+			p.Address = row[sheet_person_address_index]
+			_, err = m.mongoCli.InsertOne(m.ctx, p)
+			m.log.Infof("create new one, err: %v", err)
 		}
-		m.personSlice = append(m.personSlice, Person{
-			name:             name,
-			address:          address,
-			canDrive:         canDrive,
-			durationMap:      make(map[string]Duration, office_number_max),
-			sortMap:          make(map[int]DesignateOffice, office_number_max),
-			nearestOffices:   offices,
-			nearestDurations: officeDurations,
-			needRecal:        needRecal,
-		})
-		m.log.Debugf("Person: %v, %v", name, address)
+		m.personSlice = append(m.personSlice, p)
+		m.log.Debugf("Person: %v, %v", p.Name, p.Address)
 	}
 
 	rows, err = f.GetRows(sheet_office)
@@ -227,16 +213,20 @@ func (m *Map) loadExecelData(file string) error {
 			continue
 		}
 		name := row[sheet_office_name_index]
-		address := row[sheet_office_address_index]
-
-		m.officeSlice = append(m.officeSlice, Office{
-			name:    name,
-			address: address,
-		})
-		m.log.Debugf("Office: %v, %v", name, address)
+		o := Office{}
+		err := m.mongoCli.Find(m.ctx, bson.M{"name": name}).One(&o)
+		if err != nil {
+			o.Name = name
+			o.Address = row[sheet_office_name_index]
+			_, err = m.mongoCli.InsertOne(m.ctx, o)
+			m.log.Infof("%v does not exist, create new one, err: %v", name, err)
+		}
+		m.officeSlice = append(m.officeSlice, o)
+		m.log.Debugf("Office: %v, %v", o.Name, o.Address)
 	}
 	m.excelFile = f
 	return nil
+
 }
 
 func (m *Map) getPoi(addr string) (Poi, error) {
@@ -263,58 +253,50 @@ func (m *Map) getPoi(addr string) (Poi, error) {
 	}
 	return placeResp.Results[0].Location, nil
 }
+func IsEqual(f1, f2 float64) bool {
+	if f1 > f2 {
+		return f1-f2 < MIN
+	} else {
+		return f2-f1 < MIN
+	}
+}
 
 func (m *Map) getAllPoi() {
-	for index := range m.personSlice {
-		poiValue, _ := m.excelFile.GetCellValue(sheet_person, sheet_person_poi_name+strconv.Itoa(index+2))
-		m.log.Debugf("poiValue: %v", poiValue)
-		if poiValue == "0" {
-			poi, err := m.getPoi(m.personSlice[index].address)
+	//defer m.excelFile.Save()
+	for index, person := range m.personSlice {
+		poi := m.personSlice[index].Poi
+		if IsEqual(poi.Lat, 0) && IsEqual(poi.Lng, 0) {
+			poi, err := m.getPoi(m.personSlice[index].Address)
 			if err != nil {
 				m.log.Error(err)
 			}
-			m.personSlice[index].poi = poi
-			m.excelFile.SetCellStr(sheet_person, sheet_person_poi_name+strconv.Itoa(index+2), fmt.Sprintf("%f", poi.Lat)+","+fmt.Sprintf("%f", poi.Lng))
+			m.personSlice[index].Poi = poi
+			//	m.excelFile.SetCellStr(sheet_person, sheet_person_poi_name+strconv.Itoa(index+2), fmt.Sprintf("%f", poi.Lat)+","+fmt.Sprintf("%f", poi.Lng))
+			_, err = m.mongoCli.UpsertId(m.ctx, person.Id, m.personSlice[index])
+			if err != nil {
+				m.log.Errorf("MongoDB updating fails for %v, err: %v", person.Name, err)
+			}
 		} else {
-			m.log.Infof("Poi exists for %v", m.personSlice[index].name)
-			poiSlice := strings.Split(poiValue, ",")
-			if len(poiSlice) != 2 {
-				m.log.Errorf("Poi value format is incorrect")
-			}
-			if v, err := strconv.ParseFloat(poiSlice[0], 64); err == nil {
-				m.personSlice[index].poi.Lat = v
-			}
-			if v, err := strconv.ParseFloat(poiSlice[1], 64); err == nil {
-				m.personSlice[index].poi.Lng = v
-			}
+			m.log.Infof("Poi(%+v) exists for %v", m.personSlice[index].Poi, m.personSlice[index].Name)
 		}
 	}
-	m.excelFile.Save()
-	for index := range m.officeSlice {
-		poiValue, _ := m.excelFile.GetCellValue(sheet_office, sheet_office_poi_name+strconv.Itoa(index+2))
-		m.log.Debugf("poiValue: %v", poiValue)
-		if poiValue == "0" {
-			poi, err := m.getPoi(m.officeSlice[index].address)
+	for index, office := range m.officeSlice {
+		poi := m.officeSlice[index].Poi
+		if IsEqual(poi.Lat, 0) && IsEqual(poi.Lng, 0) {
+			poi, err := m.getPoi(m.officeSlice[index].Address)
 			if err != nil {
 				m.log.Error(err)
 			}
-			m.officeSlice[index].poi = poi
-			m.excelFile.SetCellStr(sheet_office, sheet_office_poi_name+strconv.Itoa(index+2), fmt.Sprintf("%f", poi.Lat)+","+fmt.Sprintf("%f", poi.Lng))
+			m.officeSlice[index].Poi = poi
+			//	m.excelFile.SetCellStr(sheet_office, sheet_office_poi_name+strconv.Itoa(index+2), fmt.Sprintf("%f", poi.Lat)+","+fmt.Sprintf("%f", poi.Lng))
+			_, err = m.mongoCli.UpsertId(m.ctx, office.Id, m.officeSlice[index])
+			if err != nil {
+				m.log.Errorf("MongoDB updating fails for %v, err: %v", office.Name, err)
+			}
 		} else {
-			m.log.Infof("Poi exists for %v", m.officeSlice[index].name)
-			poiSlice := strings.Split(poiValue, ",")
-			if len(poiSlice) != 2 {
-				m.log.Errorf("Poi value format is incorrect")
-			}
-			if v, err := strconv.ParseFloat(poiSlice[0], 64); err == nil {
-				m.officeSlice[index].poi.Lat = v
-			}
-			if v, err := strconv.ParseFloat(poiSlice[1], 64); err == nil {
-				m.officeSlice[index].poi.Lng = v
-			}
+			m.log.Infof("Poi(%+v) exists for %v", m.officeSlice[index].Poi, m.officeSlice[index].Name)
 		}
 	}
-	m.excelFile.Save()
 }
 
 func (m *Map) calDuration(orig, dest Poi) map[string]int {
@@ -355,87 +337,96 @@ func (m *Map) calDuration(orig, dest Poi) map[string]int {
 }
 
 func (m *Map) getAllDuration() {
+	//	defer m.excelFile.Save()
 	for index, person := range m.personSlice {
-		if person.needRecal == false {
+		if person.Done {
 			continue
 		}
 		for _, office := range m.officeSlice {
-			m.log.Infof("person : %v, office: %v", person.name, office.name)
-			duration := m.calDuration(person.poi, office.poi)
-			if duration == nil {
-				continue
-			}
-			d := Duration{
-				duration: duration,
-			}
-			d.sort = func(d map[string]int, canDrive bool) []string {
-				values := []int{}
-				for k, v := range d {
-					if !canDrive && k == "drive" {
-						continue
-					}
-					values = append(values, v)
+			m.log.Infof("person : %v, office: %v", person.Name, office.Name)
+			if !person.Done {
+				duration := m.calDuration(person.Poi, office.Poi)
+				if duration == nil {
+					continue
 				}
-				sort.Ints(values)
-				r := []string{}
-				for _, v := range values {
-					for path, duration := range d {
-						if !canDrive && path == "drive" {
+				d := Duration{
+					Duration: duration,
+				}
+				d.Sort = func(d map[string]int, canDrive bool) []string {
+					values := []int{}
+					for k, v := range d {
+						if !canDrive && k == "drive" {
 							continue
 						}
-						if v == duration {
-							r = append(r, path)
+						values = append(values, v)
+					}
+					sort.Ints(values)
+					r := []string{}
+					for _, v := range values {
+						for path, duration := range d {
+							if !canDrive && path == "drive" {
+								continue
+							}
+							if v == duration {
+								r = append(r, path)
+							}
 						}
 					}
+					return r
+				}(d.Duration, person.CanDrive)
+				if !person.CanDrive {
+					d.Sort = append(d.Sort, "drive")
 				}
-				return r
-			}(d.duration, person.canDrive)
-			if !person.canDrive {
-				d.sort = append(d.sort, "drive")
+				m.personSlice[index].DurationMap[office.Name] = d
 			}
-			m.personSlice[index].durationMap[office.name] = d
 		}
 		m.personSlice[index].designate()
-		m.excelFile.SetCellStr(sheet_person, sheet_person_office1_name+strconv.Itoa(index+2), m.personSlice[index].nearestOffices[0])
-		m.excelFile.SetCellStr(sheet_person, sheet_person_office2_name+strconv.Itoa(index+2), m.personSlice[index].nearestOffices[1])
-		m.excelFile.SetCellStr(sheet_person, sheet_person_office3_name+strconv.Itoa(index+2), m.personSlice[index].nearestOffices[2])
-		m.excelFile.SetCellInt(sheet_person, sheet_person_office1_duration1_name+strconv.Itoa(index+2), m.personSlice[index].nearestDurations[0])
-		m.excelFile.SetCellInt(sheet_person, sheet_person_office2_duration2_name+strconv.Itoa(index+2), m.personSlice[index].nearestDurations[1])
-		m.excelFile.SetCellInt(sheet_person, sheet_person_office3_duration3_name+strconv.Itoa(index+2), m.personSlice[index].nearestDurations[2])
-		m.excelFile.Save()
+		_, err := m.mongoCli.UpsertId(m.ctx, m.personSlice[index].Id, m.personSlice[index])
+		if err != nil {
+			m.log.Errorf("MongoDB updating fails for %v, err: %v", person.Name, err)
+		}
+		/*
+			m.excelFile.SetCellStr(sheet_person, sheet_person_office1_name+strconv.Itoa(index+2), m.personSlice[index].NearestOffices[0])
+			m.excelFile.SetCellStr(sheet_person, sheet_person_office2_name+strconv.Itoa(index+2), m.personSlice[index].NearestOffices[1])
+			m.excelFile.SetCellStr(sheet_person, sheet_person_office3_name+strconv.Itoa(index+2), m.personSlice[index].NearestOffices[2])
+			m.excelFile.SetCellInt(sheet_person, sheet_person_office1_duration1_name+strconv.Itoa(index+2), m.personSlice[index].NearestDurations[0])
+			m.excelFile.SetCellInt(sheet_person, sheet_person_office2_duration2_name+strconv.Itoa(index+2), m.personSlice[index].NearestDurations[1])
+			m.excelFile.SetCellInt(sheet_person, sheet_person_office3_duration3_name+strconv.Itoa(index+2), m.personSlice[index].NearestDurations[2])
+		*/
 	}
 }
 
 func (p *Person) designate() {
-	for k, v := range p.durationMap {
-		if len(v.sort) == 0 {
+	for k, v := range p.DurationMap {
+		if len(v.Sort) == 0 {
 			continue
 		}
-		d := v.duration[v.sort[0]]
-		p.sortMap[d] = DesignateOffice{
-			path: v.sort[0],
-			name: k,
+		d := v.Duration[v.Sort[0]]
+		p.SortMap[d] = DesignateOffice{
+			Path: v.Sort[0],
+			Name: k,
 		}
-		p.sortList = append(p.sortList, d)
+		p.SortList = append(p.SortList, d)
 	}
-	sort.Ints(p.sortList)
-	if p.needRecal == true {
-		for i := range p.nearestOffices {
-			p.nearestOffices[i] = p.sortMap[p.sortList[i]].name
-			p.nearestDurations[i] = p.sortList[i]
+	sort.Ints(p.SortList)
+	if !p.Done {
+		for i := range p.SortList {
+			p.NearestOffices[i] = p.SortMap[p.SortList[i]].Name
+			p.NearestDurations[i] = p.SortList[i]
 		}
 	}
 }
 
 func (p *Person) showDesignate() {
-	fmt.Printf("Person Name: %v\n", p.name)
-	for i := range p.nearestOffices {
-		fmt.Printf("\tThe nearest office: %v\n", p.nearestOffices[i])
-		fmt.Printf("\t\tDuration: %v\n", p.nearestDurations[i])
+	fmt.Printf("Person Name: %v\n", p.Name)
+	for i := range p.SortList {
+		fmt.Printf("\tThe nearest office: %v\n", p.NearestOffices[i])
+		fmt.Printf("\t\tDuration: %v\n", p.NearestDurations[i])
 	}
 }
 
 func (m *Map) showPerson() {
+	m.log.Infof("Show Person Information")
 	for _, person := range m.personSlice {
 		m.log.Info(person)
 	}
@@ -449,17 +440,24 @@ func (m *Map) showDesignateAll() {
 
 func main() {
 	logger := logrus.StandardLogger()
+	ctx := context.Background()
+	cli, err := qmgo.Open(ctx, &qmgo.Config{Uri: mongo_url, Database: mongo_database, Coll: mongo_collection})
+	if err != nil {
+		logger.Errorf("Opening mongo cli fails, err: %v", err)
+		os.Exit(1)
+	}
+	defer cli.Close(ctx)
 	m := Map{
 		restyClient: resty.New(),
 		log:         logger,
+		ctx:         ctx,
+		mongoCli:    cli,
 	}
 	logger.Infof("Load data")
 	m.loadExecelData(execel_file)
 	m.getAllPoi()
 	m.getAllDuration()
-	/*
 
-		m.showPerson()
-		m.showDesignateAll()
-	*/
+	//	m.showDesignateAll()
+	//	m.showPerson()
 }
