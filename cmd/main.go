@@ -157,6 +157,14 @@ func init() {
 	logrus.SetLevel(logrus.InfoLevel)
 }
 
+func string2Bool(s string) bool {
+	if s == "Yes" || s == "Y" || s == "y" {
+		return true
+	} else {
+		return false
+	}
+}
+
 func IsEqual(f1, f2 float64) bool {
 	if f1 > f2 {
 		return f1-f2 < MIN
@@ -203,22 +211,29 @@ func (m *Map) loadExecelData(file string) error {
 			m.log.Debugf("%v does not exist, err: %v", name, err)
 			p.Name = name
 			p.Address = row[sheet_person_address_index]
-			if row[sheet_person_path_index] == "Yes" {
-				p.CanDrive = true
-			} else {
-				p.CanDrive = false
-			}
+			p.CanDrive = string2Bool(row[sheet_person_path_index])
 			_, err = m.mongoCli.InsertOne(m.ctx, p)
 			m.log.Debugf("create new one, err: %v", err)
 		} else {
-			if row[sheet_person_path_index] == "Yes" {
-				p.CanDrive = true
-			} else {
-				p.CanDrive = false
+			changes := false
+			if string2Bool(row[sheet_person_path_index]) != p.CanDrive {
+				p.CanDrive = string2Bool(row[sheet_person_path_index])
+				changes = true
+
 			}
-			_, err = m.mongoCli.UpsertId(m.ctx, p.Id, p)
-			if err != nil {
-				m.log.Errorf("%v updating fails, err: %v", name, err)
+			if row[sheet_person_address_index] != p.Address {
+				m.log.Infof("%v's data changes(from %v to %v), reset its result", name, p.Address, row[sheet_person_address_index])
+				p.Address = row[sheet_person_address_index]
+				p.Poi = Poi{Lat: 0, Lng: 0}
+				changes = true
+			}
+			if changes {
+				p.Done = false
+				_, err = m.mongoCli.UpsertId(m.ctx, p.Id, p)
+				m.log.Infof("%v's data changes, reset its result", name)
+				if err != nil {
+					m.log.Errorf("%v updating fails, err: %v", name, err)
+				}
 			}
 		}
 		p.SortList = []int{}
@@ -234,6 +249,7 @@ func (m *Map) loadExecelData(file string) error {
 		m.log.Errorf("Can not get rows, err: %v", err)
 		os.Exit(1)
 	}
+	officeChanged := false
 	for index, row := range rows {
 		if index == 0 {
 			continue
@@ -248,14 +264,32 @@ func (m *Map) loadExecelData(file string) error {
 		err := m.mongoCli.Find(m.ctx, bson.M{"name": name}).One(&o)
 		if err != nil {
 			o.Name = name
-			o.Address = row[sheet_office_name_index]
+			o.Address = row[sheet_office_address_index]
 			_, err = m.mongoCli.InsertOne(m.ctx, o)
 			m.log.Debugf("%v does not exist, create new one, err: %v", name, err)
+			officeChanged = true
+		} else {
+			if row[sheet_office_address_index] != o.Address {
+				m.log.Infof("%v's data changes(from %v to %v), reset its result", name, o.Address, row[sheet_office_address_index])
+				o.Address = row[sheet_office_address_index]
+				o.Poi = Poi{Lat: 0, Lng: 0}
+				_, err = m.mongoCli.UpsertId(m.ctx, o.Id, o)
+				if err != nil {
+					m.log.Errorf("%v updating fails, err: %v", name, err)
+				}
+				officeChanged = true
+			}
 		}
 		o.SortMap = make(map[int][]Dummy, person_number_max)
 		o.SortList = []Dummy{}
 		m.officeSlice = append(m.officeSlice, o)
 		m.log.Debugf("Office: %v, %v", o.Name, o.Address)
+	}
+	if officeChanged {
+		m.log.Infof("Office changes, need reset result")
+		for i := range m.personSlice {
+			m.personSlice[i].Done = false
+		}
 	}
 	m.excelFile = f
 	return nil
