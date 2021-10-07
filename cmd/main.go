@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
-	_ "strconv"
+	"strconv"
 	_ "strings"
 	"sync"
 	"time"
@@ -26,53 +26,40 @@ import (
 )
 
 const (
-	max_workers                          = 40
-	MIN                                  = 0.00000001
-	nearest_offices                      = 10
-	mongo_url                            = "mongodb://10.249.64.55:27017"
-	mongo_database                       = "local"
-	mongo_collection                     = "pingan"
-	myak                                 = "w5i9dYBqFBNR3ukdvsfpuEe40Cr53OSl"
-	sk                                   = "TGXfG0jcHTegDV0aSpQXRMtApCANqtOe"
-	place                                = "/place/v2/search?query=%s&region=%s&output=json&ak=" + myak
-	path_transport                       = "/directionlite/v1/transit?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
-	path_walk                            = "/directionlite/v1/walking?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
-	path_drive                           = "/directionlite/v1/driving?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
-	path_ride                            = "/directionlite/v1/riding?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
-	office_number_max                    = 100
-	person_number_max                    = 200
-	default_region                       = "上海"
-	host                                 = "http://api.map.baidu.com"
-	execel_file                          = "data.xlsx"
-	sheet_person                         = "persons"
-	sheet_office                         = "offices"
-	sheet_person_name_index              = 0
-	sheet_person_address_index           = 1
-	sheet_person_poi_index               = 2
-	sheet_person_path_index              = 3
-	sheet_person_office1_index           = 4
-	sheet_person_office1_duration1_index = 5
-	sheet_person_office2_index           = 6
-	sheet_person_office2_duration2_index = 7
-	sheet_person_office3_index           = 8
-	sheet_person_office3_duration3_index = 9
-	sheet_person_poi_name                = "C"
-	sheet_person_office1_name            = "E"
-	sheet_person_office1_duration1_name  = "F"
-	sheet_person_office2_name            = "G"
-	sheet_person_office2_duration2_name  = "H"
-	sheet_person_office3_name            = "I"
-	sheet_person_office3_duration3_name  = "J"
-	sheet_office_name_index              = 0
-	sheet_office_address_index           = 1
-	sheet_office_poi_index               = 2
-	sheet_office_poi_name                = "C"
+	max_workers                = 40
+	MIN                        = 0.00000001
+	nearest_offices            = 10
+	nearest_persons            = 20
+	mongo_url                  = "mongodb://10.249.64.55:27017"
+	mongo_database             = "local"
+	mongo_collection           = "pingan"
+	myak                       = "w5i9dYBqFBNR3ukdvsfpuEe40Cr53OSl"
+	sk                         = "TGXfG0jcHTegDV0aSpQXRMtApCANqtOe"
+	place                      = "/place/v2/search?query=%s&region=%s&output=json&ak=" + myak
+	path_transport             = "/directionlite/v1/transit?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
+	path_walk                  = "/directionlite/v1/walking?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
+	path_drive                 = "/directionlite/v1/driving?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
+	path_ride                  = "/directionlite/v1/riding?origin=%s,%s&destination=%s,%s&timestamp=%s&ak=" + myak
+	office_number_max          = 100
+	person_number_max          = 200
+	default_region             = "上海"
+	host                       = "http://api.map.baidu.com"
+	execel_file                = "data.xlsx"
+	sheet_person               = "persons"
+	sheet_office               = "offices"
+	sheet_person_name_index    = 0
+	sheet_person_address_index = 1
+	sheet_person_path_index    = 2
+	sheet_person_result_start  = 'D'
+	sheet_office_name_index    = 0
+	sheet_office_address_index = 1
+	sheet_office_result_start  = 'C'
 )
 
 var (
 	path_type    = []string{"walk", "ride", "transport", "drive"}
 	path_map     = map[string]string{"walk": path_walk, "ride": path_ride, "transport": path_transport, "drive": path_drive}
-	time_format  = "2006-01-02 15:04:05"
+	time_format  = "2006-01-02 15:04:05" //The format must use this string
 	time_morning = "2021-10-11 07:00:00"
 )
 
@@ -103,12 +90,11 @@ type Person struct {
 	Id               primitive.ObjectID        `bson:"_id,omitempty"`
 	Name             string                    `bson:"name"`
 	Address          string                    `bson:"address"`
-	ExcelCell        string                    `bson:"excel_cell,omitempty"`
 	CanDrive         bool                      `bson:"can_drive"`
 	Poi              Poi                       `bson:"poi,omitempty"`
 	DurationMap      map[string]Duration       `bson:"duration_map,omitempty"`    // key: office.name
-	NearestOffices   [10]string                `bson:"nearest_offices,omitempty"` // save 10 nearest offices
-	NearestDurations [10]int                   `bson:"nearest_durations,omitempty"`
+	NearestOffices   [nearest_offices]string   `bson:"nearest_offices,omitempty"` // save 10 nearest offices
+	NearestDurations [nearest_offices]int      `bson:"nearest_durations,omitempty"`
 	SortList         []int                     `bson:"sort_list,omitempty"` // ordered duration value
 	SortMap          map[int][]DesignateOffice `bson:"sort_map,omitempty"`  // get office by the ordered duration value
 	Done             bool                      `bson:"done,omitempty"`
@@ -121,13 +107,12 @@ type Dummy struct {
 }
 
 type Office struct {
-	Id        primitive.ObjectID `bson:"_id,omitempty"`
-	Name      string             `bson:"name"`
-	Address   string             `bson:"address"`
-	ExcelCell string             `bson:"excel_cell,omitempty"`
-	Poi       Poi                `bson:"poi,omitempty"`
-	SortMap   map[int][]Dummy    `bson:"sort_map,omitempty"`
-	SortList  []Dummy            `bson:"sort_list,omitempty"`
+	Id       primitive.ObjectID `bson:"_id,omitempty"`
+	Name     string             `bson:"name"`
+	Address  string             `bson:"address"`
+	Poi      Poi                `bson:"poi,omitempty"`
+	SortMap  map[int][]Dummy    `bson:"sort_map,omitempty"`
+	SortList []Dummy            `bson:"sort_list,omitempty"`
 }
 
 type DesignateOffice struct {
@@ -161,16 +146,26 @@ type PathPlan struct {
 }
 
 func init() {
-	formatter := runtime.Formatter{ChildFormatter: &logrus.TextFormatter{
-		FullTimestamp: true,
-	}}
+	formatter := runtime.Formatter{
+		ChildFormatter: &logrus.TextFormatter{
+			FullTimestamp: true,
+		},
+		Line:         true,
+		File:         true,
+		BaseNameOnly: true}
 	logrus.SetFormatter(&formatter)
 	logrus.SetLevel(logrus.InfoLevel)
-	logrus.WithFields(logrus.Fields{
-		"file": "main.go",
-	})
 }
 
+func IsEqual(f1, f2 float64) bool {
+	if f1 > f2 {
+		return f1-f2 < MIN
+	} else {
+		return f2-f1 < MIN
+	}
+}
+
+/*Refer to http://lbsyun.baidu.com/apiconsole/key?application=key*/
 func generateSN(path string) string {
 	rawStr := url.QueryEscape(path + sk)
 	hasher := md5.New()
@@ -205,7 +200,7 @@ func (m *Map) loadExecelData(file string) error {
 		}
 		err := m.mongoCli.Find(m.ctx, bson.M{"name": name}).One(&p)
 		if err != nil {
-			m.log.Infof("%v does not exist, err: %v", name, err)
+			m.log.Debugf("%v does not exist, err: %v", name, err)
 			p.Name = name
 			p.Address = row[sheet_person_address_index]
 			if row[sheet_person_path_index] == "Yes" {
@@ -214,7 +209,7 @@ func (m *Map) loadExecelData(file string) error {
 				p.CanDrive = false
 			}
 			_, err = m.mongoCli.InsertOne(m.ctx, p)
-			m.log.Infof("create new one, err: %v", err)
+			m.log.Debugf("create new one, err: %v", err)
 		} else {
 			if row[sheet_person_path_index] == "Yes" {
 				p.CanDrive = true
@@ -223,7 +218,7 @@ func (m *Map) loadExecelData(file string) error {
 			}
 			_, err = m.mongoCli.UpsertId(m.ctx, p.Id, p)
 			if err != nil {
-				m.log.Infof("%v updating fails, err: %v", name, err)
+				m.log.Errorf("%v updating fails, err: %v", name, err)
 			}
 		}
 		p.SortList = []int{}
@@ -255,7 +250,7 @@ func (m *Map) loadExecelData(file string) error {
 			o.Name = name
 			o.Address = row[sheet_office_name_index]
 			_, err = m.mongoCli.InsertOne(m.ctx, o)
-			m.log.Infof("%v does not exist, create new one, err: %v", name, err)
+			m.log.Debugf("%v does not exist, create new one, err: %v", name, err)
 		}
 		o.SortMap = make(map[int][]Dummy, person_number_max)
 		o.SortList = []Dummy{}
@@ -291,16 +286,9 @@ func (m *Map) getPoi(addr string) (Poi, error) {
 	}
 	return placeResp.Results[0].Location, nil
 }
-func IsEqual(f1, f2 float64) bool {
-	if f1 > f2 {
-		return f1-f2 < MIN
-	} else {
-		return f2-f1 < MIN
-	}
-}
 
 func (m *Map) getAllPoi() {
-	//defer m.excelFile.Save()
+	m.log.Infof("Get poi for address")
 	for index, person := range m.personSlice {
 		poi := m.personSlice[index].Poi
 		if IsEqual(poi.Lat, 0) && IsEqual(poi.Lng, 0) {
@@ -309,13 +297,12 @@ func (m *Map) getAllPoi() {
 				m.log.Errorf("Getting poi for %v fails, err: %v", person.Name, err)
 			}
 			m.personSlice[index].Poi = poi
-			//	m.excelFile.SetCellStr(sheet_person, sheet_person_poi_name+strconv.Itoa(index+2), fmt.Sprintf("%f", poi.Lat)+","+fmt.Sprintf("%f", poi.Lng))
 			_, err = m.mongoCli.UpsertId(m.ctx, person.Id, m.personSlice[index])
 			if err != nil {
 				m.log.Errorf("MongoDB updating fails for %v, err: %v", person.Name, err)
 			}
 		} else {
-			m.log.Infof("Poi(%+v) exists for %v", m.personSlice[index].Poi, m.personSlice[index].Name)
+			m.log.Debugf("Poi(%+v) exists for %v", m.personSlice[index].Poi, m.personSlice[index].Name)
 		}
 	}
 	for index, office := range m.officeSlice {
@@ -326,13 +313,12 @@ func (m *Map) getAllPoi() {
 				m.log.Errorf("Getting poi for %v fails, err: %v", office.Name, err)
 			}
 			m.officeSlice[index].Poi = poi
-			//	m.excelFile.SetCellStr(sheet_office, sheet_office_poi_name+strconv.Itoa(index+2), fmt.Sprintf("%f", poi.Lat)+","+fmt.Sprintf("%f", poi.Lng))
 			_, err = m.mongoCli.UpsertId(m.ctx, office.Id, m.officeSlice[index])
 			if err != nil {
 				m.log.Errorf("MongoDB updating fails for %v, err: %v", office.Name, err)
 			}
 		} else {
-			m.log.Infof("Poi(%+v) exists for %v", m.officeSlice[index].Poi, m.officeSlice[index].Name)
+			m.log.Debugf("Poi(%+v) exists for %v", m.officeSlice[index].Poi, m.officeSlice[index].Name)
 		}
 	}
 }
@@ -373,7 +359,7 @@ func (m *Map) calDuration(origin, dest Poi) map[string]int {
 
 func (m *Map) calDurationForAllOffices(person *Person) {
 	for _, office := range m.officeSlice {
-		m.log.Infof("person : %v, office: %v, done: %v", person.Name, office.Name, person.Done)
+		m.log.Debugf("person : %v, office: %v, done: %v", person.Name, office.Name, person.Done)
 		duration := m.calDuration(person.Poi, office.Poi)
 		if duration == nil {
 			continue
@@ -417,29 +403,19 @@ func (m *Map) calDurationForAllOffices(person *Person) {
 	m.currentWorker--
 	m.wg.Done()
 	m.lock.Unlock()
-
-	/*
-		m.excelFile.SetCellStr(sheet_person, sheet_person_office1_name+strconv.Itoa(index+2), m.personSlice[index].NearestOffices[0])
-		m.excelFile.SetCellStr(sheet_person, sheet_person_office2_name+strconv.Itoa(index+2), m.personSlice[index].NearestOffices[1])
-		m.excelFile.SetCellStr(sheet_person, sheet_person_office3_name+strconv.Itoa(index+2), m.personSlice[index].NearestOffices[2])
-		m.excelFile.SetCellInt(sheet_person, sheet_person_office1_duration1_name+strconv.Itoa(index+2), m.personSlice[index].NearestDurations[0])
-		m.excelFile.SetCellInt(sheet_person, sheet_person_office2_duration2_name+strconv.Itoa(index+2), m.personSlice[index].NearestDurations[1])
-		m.excelFile.SetCellInt(sheet_person, sheet_person_office3_duration3_name+strconv.Itoa(index+2), m.personSlice[index].NearestDurations[2])
-	*/
-
 }
 
 func (m *Map) getAllDuration() {
-	//	defer m.excelFile.Save()
+	m.log.Infof("Get duration from person to office")
 	for index := range m.personSlice {
 		if m.personSlice[index].Done {
-			m.log.Infof("%v has done", m.personSlice[index].Name)
+			m.log.Debugf("%v has done", m.personSlice[index].Name)
 			continue
 		}
 		for {
 			m.lock.Lock()
 			if m.currentWorker < max_workers {
-				m.log.Infof("Current Workers: %d", m.currentWorker)
+				m.log.Debugf("Current Workers: %d", m.currentWorker)
 				m.wg.Add(1)
 				go m.calDurationForAllOffices(&m.personSlice[index])
 				m.currentWorker++
@@ -453,7 +429,8 @@ func (m *Map) getAllDuration() {
 	}
 	m.wg.Wait()
 }
-func (m *Map) handle() {
+func (m *Map) findOffices() {
+	m.log.Infof("Calculate duration to find nearest offices for a person")
 	for index := range m.personSlice {
 		m.personSlice[index].designate()
 		_, err := m.mongoCli.UpsertId(m.ctx, m.personSlice[index].Id, m.personSlice[index])
@@ -494,6 +471,7 @@ func (p *Person) designate() {
 }
 
 func (m *Map) findPersons() {
+	m.log.Infof("Calculate duration to find nearest persons for an office")
 	for index, office := range m.officeSlice {
 		for _, person := range m.personSlice {
 			duration := person.DurationMap[office.Name]
@@ -513,10 +491,8 @@ func (m *Map) findPersons() {
 			keys = append(keys, key)
 		}
 		sort.Ints(keys)
-		m.log.Infof("%v, keys: %v", office.Name, keys)
 		for _, key := range keys {
 			for i := range m.officeSlice[index].SortMap[key] {
-				m.log.Infof("%v, key: %v, i: %v", office.Name, key, i)
 				m.officeSlice[index].SortList = append(m.officeSlice[index].SortList, m.officeSlice[index].SortMap[key][i])
 			}
 		}
@@ -525,6 +501,23 @@ func (m *Map) findPersons() {
 			m.log.Errorf("MongoDB updating fails for %v, err: %v", office.Name, err)
 		}
 
+	}
+}
+
+func (m *Map) writeToExcel() {
+	defer m.excelFile.Save()
+
+	m.log.Infof("Write result to excel file")
+	for index := range m.personSlice {
+		for i := 0; i < nearest_offices; i++ {
+			m.excelFile.SetCellStr(sheet_person, string(sheet_person_result_start+i)+strconv.Itoa(index+2), m.personSlice[index].NearestOffices[i]+" ("+strconv.Itoa(m.personSlice[index].NearestDurations[i])+")")
+		}
+	}
+
+	for index := range m.officeSlice {
+		for i := 0; i < nearest_persons; i++ {
+			m.excelFile.SetCellStr(sheet_office, string(sheet_office_result_start+i)+strconv.Itoa(index+2), m.officeSlice[index].SortList[i].PersonName+" ("+strconv.Itoa(m.officeSlice[index].SortList[i].Duration)+")")
+		}
 	}
 }
 
@@ -565,12 +558,13 @@ func main() {
 		mongoCli:    cli,
 		lock:        &sync.Mutex{},
 	}
-	logger.Infof("Load data")
+	logger.Infof("Load data from excel file")
 	m.loadExecelData(execel_file)
 	m.getAllPoi()
 	m.getAllDuration()
-	m.handle()
+	m.findOffices()
 	m.findPersons()
+	m.writeToExcel()
 
 	//	m.showDesignateAll()
 	//	m.showPerson()
